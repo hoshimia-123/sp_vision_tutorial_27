@@ -29,7 +29,7 @@ int main()
     std::vector<int> data(N, 42);
     auto start = std::chrono::high_resolution_clock::now();
 
-    copy(data);  // 此处发生深拷贝
+    take(std::move(data));  // 此处发生深拷贝
 
     auto end = std::chrono::high_resolution_clock::now();
     double ms = std::chrono::duration<double, std::milli>(end - start).count();

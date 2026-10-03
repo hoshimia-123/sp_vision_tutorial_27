@@ -12,8 +12,10 @@ std::mutex mutex;
 void work()
 {
   for (int i = 0; i < N; ++i) {
+    mutex.lock();
     counter++;
-  }
+    mutex.unlock();
+   }
 }
 
 int main()
@@ -21,6 +23,7 @@ int main()
   std::vector<std::thread> threads;
 
   for (int i = 0; i < 8; ++i) {
+    
     threads.emplace_back(work);
   }
 
