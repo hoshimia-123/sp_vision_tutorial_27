@@ -184,27 +184,26 @@ geometry_msgs::msg::TwistStamped PidController::computeVelocityCommands(
   angular_integral_ = std::clamp(
     angular_integral_ + heading_error * dt, -1.0, 1.0);
 
-  // PID 计算
-  double linear_speed =
+  // 全向底盘：PID 只算速度大小，方向直接指向前视点
+  const double speed = std::clamp(
     linear_kp_ * distance_error +
     linear_ki_ * linear_integral_ +
-    linear_kd_ * distance_derivative;
+    linear_kd_ * distance_derivative,
+    0.0, max_linear_speed_);
 
-  double angular_speed =
-    angular_kp_ * heading_error +
-    angular_ki_ * angular_integral_ +
-    angular_kd_ * heading_derivative;
+  // map 坐标系下的速度
+  const double vx_map = speed * dx / std::max(distance_error, 1e-6);
+  const double vy_map = speed * dy / std::max(distance_error, 1e-6);
 
-  // 转向角度较大时，降低前进速度
-  linear_speed *= std::max(0.0, std::cos(heading_error));
+  // 旋转到 base_link 坐标系（仿真器按 base_link 执行速度）
+  const double c = std::cos(yaw);
+  const double s = std::sin(yaw);
+  cmd_vel.twist.linear.x = c * vx_map + s * vy_map;
+  cmd_vel.twist.linear.y = -s * vx_map + c * vy_map;
 
-  cmd_vel.twist.linear.x =
-    std::clamp(linear_speed, 0.0, max_linear_speed_);
-
-  cmd_vel.twist.angular.z =
-    std::clamp(
-      angular_speed, -max_angular_speed_, max_angular_speed_);
-
+  // 仿真器不读 angular.z
+  cmd_vel.twist.angular.z = 0.0;
+  
   previous_distance_error_ = distance_error;
   previous_heading_error_ = heading_error;
   previous_time_ = now;

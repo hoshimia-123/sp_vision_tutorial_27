@@ -11,6 +11,10 @@
       <Sequence>
         <ForceSuccess>
           <Sequence>
+           <GimbalControl mode="2"/>
+            <ChassisMode mode="1"
+                         is_stop="false"
+                         rotate_velocity="0.0"/>
             <NavToPose goal_pose=""
                        goal_pose_stamped="{clicked_point}"/>
             <ChassisMode mode="0"

@@ -98,9 +98,33 @@ nav_msgs::msg::Path AStarPlanner::createPlan(
   auto idx = [&](int x, int y){ return y * W + x; };
 
   if (isBlocked(map.data[idx(s.x, s.y)])) {
-    RCLCPP_ERROR(logger_, "Start is in blocked cell (cost=%d).", (int)map.data[idx(s.x, s.y)]);
-    return path;
+    // 机器人贴墙时起点会落在膨胀区内，直接放弃会让导航永远卡住。
+    // 改为在 1 m 范围内找最近的可通行格子作为起点，把机器人引导回走廊中间。
+    const int max_r = 20;  // 20 格 × 0.05 m = 1.0 m
+    int best_d2 = std::numeric_limits<int>::max();
+    GridIndex best = s;
+    for (int dy = -max_r; dy <= max_r; ++dy) {
+      for (int dx = -max_r; dx <= max_r; ++dx) {
+        const int nx = s.x + dx;
+        const int ny = s.y + dy;
+        if (!inBounds(map, nx, ny) || isBlocked(map.data[idx(nx, ny)])) continue;
+        const int d2 = dx * dx + dy * dy;
+        if (d2 < best_d2) {
+          best_d2 = d2;
+          best = {nx, ny};
+        }
+      }
+    }
+    if (best_d2 == std::numeric_limits<int>::max()) {
+      RCLCPP_ERROR(logger_, "Start is in blocked cell (cost=%d) and no free cell within 1 m.",
+        (int)map.data[idx(s.x, s.y)]);
+      return path;
+    }
+    RCLCPP_WARN(logger_, "Start is in blocked cell, using nearest free cell (%d, %d) instead.",
+      best.x, best.y);
+    s = best;
   }
+
   if (isBlocked(map.data[idx(g.x, g.y)])) {
     RCLCPP_ERROR(logger_, "Goal is in blocked cell (cost=%d).", (int)map.data[idx(g.x, g.y)]);
     return path;
