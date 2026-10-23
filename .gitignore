@@ -7,3 +7,7 @@ log
 .clangd
 compile_commands.json
 src/sp_nav_sim/sp_nav_sim/sim/dyn_core.c
+
+# 运行时生成的日志与测试输出
+**/logs/
+**/test-output/

@@ -1,144 +1,114 @@
-# 27算法组导航方向招新大作业
+# 27算法组导航方向招新大作业 - 迷宫点击导航
 
-## 0\. 环境配置
+机器人从迷宫左下角 (0.9, 0.9) 出发，在 RViz 里对右上角终点 (14.1, 14.1) 点击一次，经过上层行为树、下层行为树和 A* 规划后，由我写的控制器插件跟踪路径走到终点。
 
-```Plain Text
-// 已装 Ubuntu 22.04 和 ROS2 Humble
-sudo apt update
-sudo apt install -y \
-  python3-colcon-common-extensions \
-  python3-rosdep \
-  ros-humble-pluginlib \
-  ros-humble-tf2-ros \
-  ros-humble-tf2-geometry-msgs \
-  ros-humble-nav-msgs \
-  ros-humble-std-srvs \
-  ros-humble-rviz2 \
-  ros-humble-behaviortree-cpp-v3 \
-  qtbase5-dev \
-  libopencv-dev \
-  libyaml-cpp-dev
-  
-pip3 install --user pygame numpy Pillow
+## 运行方法
+
+环境：Ubuntu 22.04 + ROS 2 Humble，依赖按作业说明安装。仿真器还需要 Python 版 OpenCV：
+
+```bash
+sudo apt install -y python3-opencv
 ```
 
-## 1\. 作业目标
+编译：
 
-在给定的迷宫地图上，完成 **一次点击导航** 全流程：
+```bash
+cd ~/sp_vision_tutorial_27
+colcon build --symlink-install
+```
 
-1. 机器人从 **固定起点** 出发；
+启动：
 
-2. 选手在 RViz 中对 **指定终点** 发布一次目标；
+```bash
+bash bash/sim_nav_all_start.sh
+```
 
-3. 上层行为树 `click_nav.xml` 触发导航；
+等 RViz 和仿真窗口都打开后，用 RViz 工具栏里的 2D Goal Pose 在右上角终点的通道中间点一次。
 
-4. 下层行为树 `default_nav_with_fallback.xml` 调用 A\* 规划全局路径；
+## 整体流程
 
-5. **你实现的控制器插件** 跟踪规划轨迹，使机器人准确、平滑地到达终点。
+1. RViz 发布 /goal_pose，sp_decision 收到后执行上层行为树 click_nav.xml
+2. 上层行为树锁定云台、设置底盘跟随，然后通过 navigate_to_pose action 发出导航任务
+3. nav_interface_node 执行下层行为树 default_nav_with_fallback.xml：通过 TF 获取 map 到 base_link 的位姿，调用 make_plan 服务
+4. planner_server 用 A* 规划路径，发布到 /global_path
+5. controller_server 加载我的 PidController 插件跟踪路径，把速度发到 /sentry/cmd_vel
+6. sim_robot_node 接收速度，更新机器人位置，并发布 /Odometry 和 TF
 
-## 2\. 任务场景
+## 我做的修改
 
-### 2\.1 地图
+### 1. 补全配置
 
-|项目|数值|
-|---|---|
-|文件|`maze_map.pgm` / `maze_map.yaml`|
-|分辨率|`0.05 m/pixel`|
-|尺寸|`15.00 m × 15.00 m`（300×300）|
-|走廊宽度|约 `1.50 m`|
-|墙厚|约 `0.15 m`<br>|
+把 sp_nav_bringup/config/nav_params.yaml 里空着的话题、坐标系、插件参数补全，让各个节点之间对得上：
 
-<p align="center">
-  <img src="images/image_1.png" alt="仿真 GUI" width="420" />
-  <img src="images/image_2.png" alt="代价地图与全局路径" width="420" />
-</p>
+- 全局代价地图 /global_costmap，全局路径 /global_path，速度指令 /sentry/cmd_vel
+- 坐标系 map -> lidar_odom -> base_link，里程计 /Odometry
 
-### 2\.2 固定起终点
+### 2. 控制器 pid_controller.cpp
 
-||**map 系坐标 \(x, y\)**|**说明**|
+一开始我按差速小车的思路写，用 angular.z 转向，结果机器人一直绕小圈，走得很慢，到拐角就卡住。看了仿真器的代码后发现两点：
+
+- 仿真机器人是全向底盘，sim_robot_node 只读 cmd_vel 的 linear.x 和 linear.y，根本不读 angular.z
+- base_link 的朝向跟着云台转，云台默认是全向扫描模式，大约每秒转 1 rad，而速度指令是按 base_link 坐标系执行的
+
+所以我把控制器改成这样：
+
+1. 在路径上找离机器人最近的点，再往前找第一个距离不小于 lookahead_distance 的点，作为前视点
+2. 用 PID 算速度大小，误差是机器人到前视点的距离：speed = kp * d + ki * 积分 + kd * 微分，再限制在 0 到 max_linear_speed 之间
+3. 速度方向指向前视点，得到 map 坐标系下的速度 (vx_map, vy_map)
+4. 用当前 yaw 把速度旋转到 base_link 坐标系：
+   vx = cos(yaw) * vx_map + sin(yaw) * vy_map
+   vy = -sin(yaw) * vx_map + cos(yaw) * vy_map
+5. angular.z 设为 0，进入 goal_tolerance 范围就停车
+
+快到终点时，到前视点的距离会变短，速度会自己降下来。
+
+### 3. 上层行为树 click_nav.xml
+
+在 NavToPose 前面加了两个节点：
+
+```xml
+<GimbalControl mode="2"/>
+<ChassisMode mode="1" is_stop="false" rotate_velocity="0.0"/>
+```
+
+mode 2 是云台 yaw 锁定，mode 1 是底盘跟随。原因是 base_link 一直转的时候，控制器用的是上一次收到的 yaw，位姿只要有一点延迟，算出来的速度方向就会偏，拐角处离墙近就容易蹭墙。底盘小陀螺转起来时，方形底盘的角也容易扫到墙。导航结束后后面原有的节点会把模式恢复。
+
+### 4. A* 规划器 astar_planner.cpp
+
+下层行为树会不停地从机器人当前位置重新规划。机器人过弯贴墙时，当前位置会落在代价地图的膨胀区里（cost = 100），原来的代码会直接返回空路径，导航就一直卡着。我改成了在 1 m 范围内找最近的可通行格子当起点，这样能把机器人重新引回走廊中间。
+
+## 参数
+
+PidController 的参数在 nav_params.yaml 里：
+
+| 参数 | 值 | 说明 |
 |---|---|---|
-|**起点**|`(0.900, 0.900)`|迷宫左下角通路中心；仿真初始位置已设为此处|
-|**终点**|`(14.100, 14.100)`|迷宫右上角通路中心；评测时只允许对该点 click 一次|
+| linear_kp | 3.0 | 直道上 kp 乘前视距离大于最大速度，可以按最大速度走 |
+| linear_ki / linear_kd | 0.0 | 前视点误差基本不变，不需要积分和微分 |
+| max_linear_speed | 1.0 | 单位 m/s，兼顾用时和过弯安全 |
+| lookahead_distance | 0.5 | 单位 m，太短会抖，太长拐角会切弯贴墙 |
+| goal_tolerance | 0.15 | 单位 m，控制器停车距离，行为树判定到达是 0.3 m |
 
-- **不允许拖拽改起点、不允许中途二次改目标；**
+## RViz 显示
 
-- **不允许手动发布 ****`cmd_vel`**** 绕过控制器。**
+- 全局代价地图 /global_costmap
+- 局部代价地图 /local_costmap/costmap
+- 全局路径 /global_path（绿线）
+- 机器人位姿（TF 里的 base_link）
+- 起点和终点标记 /plan_markers
 
-### 2\.3 仿真器
+## 测试结果
 
-- **不允许修改仿真器内部代码及参数；**
-
-- **仿真里机器人撞墙便会卡住。**
-
-## 3\. 发放内容与你需要完成的部分
-
-### 3\.1 发放给你的代码
-
-|包|内容|
+| 项目 | 结果 |
 |---|---|
-|`robot_msg`|消息 / Action|
-|`sp_map_server`|ESDF / 全局代价地图|
-|`sp_global_planner`|A\* 全局规划|
-|`sp_nav_bt`|下层 BT：`default_nav_with_fallback.xml`|
-|`sp_decision`|上层 BT：`click_nav.xml`|
-|`sp_nav_bringup`|启动与地图（含 `maze_map`）|
-|`sp_nav_sim`|拖拽仿真（里程计 \+ TF）|
-|`sp_controller_server`|控制器框架（`ControllerPlugin` 接口、`controller_node`、pluginlib 加载）|
+| 是否到达 | （填写） |
+| 用时 | （填写） |
+| 最终离终点距离 | （填写） |
 
-控制器侧（名称可自定，但须 pluginlib 可加载）：
+在我的虚拟机上调试时遇到一个问题：仿真器发布局部代价地图的那段 Python 循环太慢，要求 30 Hz，实际只有 3 Hz 左右，把仿真器的 ROS 线程占满了，导致 /Odometry 发不出来、速度指令也处理不了，机器人看起来不动或者走走停停。这是虚拟机性能不够，和导航代码无关，在性能正常的电脑上用原版仿真参数就能正常跑。
 
-- `include/sp_controller_server/controller_plugin.hpp`（接口，只读）
+## 还可以改进的地方
 
-- `plugins/<你的控制器>.hpp/.cpp`（由你实现）
-
-- `plugin_description.xml`、`CMakeLists.txt`（需正确注册插件）
-
-- `launch/controller.launch.py`
-
-**注意：代码中已给出 PidController（\.cpp 与 \.hpp）的大体框架，可直接在此基础上修改。**
-
-### 3\.2 你必须完成的工作（代码中已用 TODO 标明）
-
-1. **实现路径跟踪控制器插件**
-
-实现 `ControllerPlugin` 三个接口：
-
-- `configure(...)`：读参数、初始化
-
-- `setPlan(path)`：接收 `/global_path`（经 controller server 转发）
-
-- `computeVelocityCommands(pose, velocity)`：输出 `TwistStamped`（线速度）
-
-2. **修改参数使工程能在迷宫上跑通**
-
-发放包中部分路径 / 话题 / 坐标系 / 为空，直接运行`sim_nav_all_start.sh`不能正确评测迷宫任务，你需要自行排查并修改。
-
-3. **可视化与代码管理**
-
-在 RViz 中至少清晰展示：全局代价地图、全局路径、机器人位姿、目标点等；代码要有清晰的 commit 记录，知道该忽略哪些文件。
-
-## 4\. 评分标准（100 分）
-
-**评测方式：固定起点 → 一次 click 到固定终点 → 记录从目标下发到判定到达的过程。**
-
-|**分项**|**分值**|**考察内容**|
-|---|---|---|
-|**准确到达**|25|最终位置与终点距离|
-|**时间**|25|从收到目标到到达的用时|
-|**跟踪精度**|20|对采样位姿计算到全局参考路径的误差|
-|**报告**|15|清晰的 README 介绍你的项目|
-|**可视化与代码管理**|15|RViz 地图、路径、机器人清晰；代码管理清晰|
-
-## 5\. 加分项（**不超过总分 100**）
-
-- 轨迹平滑（平滑 A\* 轨迹或直接使用其他算法）；
-
-- 自研优于 PID 的控制器（例如使用 LQR 或 MPC）。
-
-## 6\. 提交要求
-
-- 线上提交到自己的 git 仓库对应分支，需包含完整可编译源码；
-
-- 如虚拟机卡顿且自己无法解决，10\.6后可线下到地下室使用小电脑调试（需提前告知群里导航方向管理员）；
-
-- DDL：10\.25。
+- 对 A* 路径做平滑，减少折线拐角
+- 根据路径曲率规划速度，拐弯前减速，直道加速
+- 尝试 LQR 或 MPC 控制器
