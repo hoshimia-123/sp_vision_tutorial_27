@@ -12,6 +12,7 @@
 #include <tf2_ros/buffer.h>
 
 #include "sp_controller_server/controller_plugin.hpp"
+#include <chrono>
 
 namespace pid_controller {
 
@@ -36,6 +37,29 @@ private:
   rclcpp::Node::SharedPtr node_;
   nav_msgs::msg::Path global_plan_;
   std::string base_frame_id_;
+
+  double linear_kp_{0.8};
+  double linear_ki_{0.0};
+  double linear_kd_{0.0};
+
+  double angular_kp_{2.0};
+  double angular_ki_{0.0};
+  double angular_kd_{0.0};
+
+  double max_linear_speed_{0.5};
+  double max_angular_speed_{1.5};
+  double lookahead_distance_{0.25};
+  double goal_tolerance_{0.15};
+
+  double linear_integral_{0.0};
+  double angular_integral_{0.0};
+  double previous_distance_error_{0.0};
+  double previous_heading_error_{0.0};
+
+  bool has_previous_error_{false};
+
+  std::chrono::steady_clock::time_point previous_time_{
+    std::chrono::steady_clock::now()};
 };
 
 }
